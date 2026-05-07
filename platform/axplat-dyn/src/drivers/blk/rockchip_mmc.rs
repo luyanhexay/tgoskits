@@ -62,11 +62,21 @@ fn probe(info: FdtInfo<'_>, plat_dev: PlatformDevice) -> Result<(), OnProbeError
         );
 
         if clk.name == Some("core".to_string()) {
-            let id = info
-                .phandle_to_device_id(clk.phandle)
-                .expect("no device id");
+            let id = match info.phandle_to_device_id(clk.phandle) {
+                Some(id) => id,
+                None => {
+                    info!("clock phandle {:?} not found, skipping", clk.phandle);
+                    continue;
+                }
+            };
 
-            let clk_dev = rdrive::get::<rdif_clk::Clk>(id).expect("clk not found");
+            let clk_dev = match rdrive::get::<rdif_clk::Clk>(id) {
+                Ok(dev) => dev,
+                Err(_) => {
+                    info!("clk device {:?} not found, skipping", id);
+                    continue;
+                }
+            };
 
             let clk_dev = ClkDev {
                 inner: clk_dev,

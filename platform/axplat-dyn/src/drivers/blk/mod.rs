@@ -10,8 +10,7 @@ use super::DmaImpl;
 mod phytium;
 #[cfg(feature = "sdmmc")]
 mod rockchip_mmc;
-#[cfg(feature = "simple-sdmmc")]
-mod rockchip_sd;
+mod rockchip_sd; // Always include when simple-sdmmc dependency is available
 mod virtio;
 mod virtio_pci;
 

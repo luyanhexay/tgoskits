@@ -51,7 +51,7 @@ fn probe(info: FdtInfo<'_>, plat_dev: PlatformDevice) -> Result<(), OnProbeError
 
     let dev = SdBlockDevice { dev: Some(sd) };
     plat_dev.register_block(dev);
-    info!("rockchip-sd block device registered");
+    debug!("rockchip-sd block device registered successfully");
     Ok(())
 }
 

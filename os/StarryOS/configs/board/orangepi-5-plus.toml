@@ -8,7 +8,7 @@ features = [
   "ax-feat/driver-sdmmc",
   "axplat-dyn/pci-list-devices",
   "axplat-dyn/rockchip-soc",
-  "axplat-dyn/sdmmc",
+  "axplat-dyn/simple-sdmmc",
   "rknpu",
 ]
 log = "Info"
