@@ -40,6 +40,14 @@ impl GpioBank {
         }
     }
 
+    /// Create a GpioBank with pre-computed IomuxReg entries (including per-bank base offset).
+    pub fn new_with_iomux(base: Mmio, iomux: [IomuxReg; 4]) -> Self {
+        GpioBank {
+            base: base.as_ptr() as usize,
+            iomux,
+        }
+    }
+
     fn reg(&self) -> &Registers {
         unsafe { &*(self.base as *const Registers) }
     }

@@ -4,7 +4,7 @@
 
 use crate::{
     GpioDirection, Mmio, PinConfig, PinId,
-    pinctrl::{Iomux, PinCtrlOp, PinctrlResult, gpio::GpioBank},
+    pinctrl::{Iomux, PinCtrlOp, PinctrlResult, gpio::{GpioBank, IomuxReg}},
 };
 
 mod pinconf_regs;
@@ -35,15 +35,45 @@ impl PinCtrl {
             panic!("RK3588 PinCtrl requires 5 GPIO banks");
         }
 
-        let iomux = [Iomux::WIDTH_4BIT; 4];
+        // RK3588 BUS_IOC IOMUX register layout (per u-boot pinctrl-rk3588.c):
+        // Each GPIO bank occupies 4 groups × 8 bytes = 0x20 bytes in BUS_IOC.
+        // Bank N (N=1..4) starts at offset (N-1)*0x20 within BUS_IOC.
+        // GPIO0 pins use PMU1_IOC/PMU2_IOC (handled separately in reg.rs).
+        //
+        // Group offsets within each bank:  A=+0x00, B=+0x08, C=+0x10, D=+0x18
+        //
+        // So the final BUS_IOC offset for a pin is:
+        //   (bank-1)*0x20 + group_within_bank*0x08 + (pin%8>=4 ? 4 : 0)
+        //
+        // GpioBank stores the *group_within_bank* offset (0,8,0x10,0x18) in
+        // its iomux[].offset array. reg.rs adds BUS_IOC (0x8000) but does NOT
+        // add the per-bank base. We fix this by pre-biasing each bank's iomux
+        // offsets with its BUS_IOC bank base.
+        let iomux_for_bank = |bank_bus_offset: usize| -> [IomuxReg; 4] {
+            core::array::from_fn(|i| IomuxReg {
+                ty: Iomux::WIDTH_4BIT,
+                offset: bank_bus_offset + i * 8,
+            })
+        };
+
         Self {
             pinctrl: unsafe { PinctrlReg::new(ioc) },
             gpio_banks: [
-                GpioBank::new(gpio[0], iomux), // GPIO0 (Pin 0-31) - PMU1_IOC
-                GpioBank::new(gpio[1], iomux), // GPIO1 (Pin 32-63) - BUS_IOC
-                GpioBank::new(gpio[2], iomux), // GPIO2 (Pin 64-95) - BUS_IOC
-                GpioBank::new(gpio[3], iomux), // GPIO3 (Pin 96-127) - BUS_IOC
-                GpioBank::new(gpio[4], iomux), // GPIO4 (Pin 128-159) - BUS_IOC
+                // GPIO0: special-cased in reg.rs (PMU1/PMU2 IOC), use offset=0
+                GpioBank::new_with_iomux(gpio[0], [
+                    IomuxReg { ty: Iomux::WIDTH_4BIT, offset: 0x00 },
+                    IomuxReg { ty: Iomux::WIDTH_4BIT, offset: 0x08 },
+                    IomuxReg { ty: Iomux::WIDTH_4BIT, offset: 0x10 },
+                    IomuxReg { ty: Iomux::WIDTH_4BIT, offset: 0x18 },
+                ]),
+                // GPIO1: BUS_IOC base offset = 0x0020 (A=0x0020, B=0x0028, C=0x0030, D=0x0038)
+                GpioBank::new_with_iomux(gpio[1], iomux_for_bank(0x0020)),
+                // GPIO2: BUS_IOC base offset = 0x0040 (A=0x0040, B=0x0048, C=0x0050, D=0x0058)
+                GpioBank::new_with_iomux(gpio[2], iomux_for_bank(0x0040)),
+                // GPIO3: BUS_IOC base offset = 0x0060 (A=0x0060, B=0x0068, C=0x0070, D=0x0078)
+                GpioBank::new_with_iomux(gpio[3], iomux_for_bank(0x0060)),
+                // GPIO4: BUS_IOC base offset = 0x0080 (A=0x0080, B=0x0088, C=0x0090, D=0x0098)
+                GpioBank::new_with_iomux(gpio[4], iomux_for_bank(0x0080)),
             ],
         }
     }

@@ -19,6 +19,7 @@ mod rknpu;
 #[cfg(feature = "serial")]
 mod serial;
 mod soc;
+pub use soc::rk3588_set_pin_mux;
 #[cfg(feature = "rtc")]
 mod time;
 mod virtio;

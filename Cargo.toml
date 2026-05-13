@@ -107,6 +107,7 @@ members = [
     "components/timer_list",
     "components/x86_vcpu",
     "components/x86_vlapic",
+    "components/dw_apb_uart",
     "drivers/blk/simple-sdmmc",
     "drivers/npu/rockchip-npu",
     "drivers/pci/rk3588-pci",
@@ -350,3 +351,6 @@ lock_api = { version = "0.4", default-features = false }
 log = "0.4"
 spin = "0.10"
 ostool = { version = "0.15" }
+
+[patch.crates-io]
+dw_apb_uart = { path = "components/dw_apb_uart" }

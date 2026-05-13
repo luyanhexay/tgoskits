@@ -116,6 +116,7 @@ zerocopy = { version = "0.8", features = ["derive"] }
 ax-ipi = { workspace = true }
 static-keys = "0.8"
 ddebug = "0.5"
+dw_apb_uart = "0.1.0"
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86 = "0.52"

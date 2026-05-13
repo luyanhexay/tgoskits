@@ -7,7 +7,7 @@ use fdt_edit::{Fdt, NodeType, Phandle, RegFixed};
 use rdrive::{
     DriverGeneric, PlatformDevice, module_driver, probe::OnProbeError, register::FdtInfo,
 };
-use rockchip_soc::{GpioDirection, PinConfig, PinCtrl, PinCtrlOp, PinId, SocType};
+use rockchip_soc::{GpioDirection, Iomux, PinConfig, PinCtrl, PinCtrlOp, PinId, Pull, PinctrlResult, SocType};
 
 use crate::drivers::iomap;
 
@@ -36,6 +36,17 @@ unsafe impl Send for RockchipPinCtrl {}
 impl RockchipPinCtrl {
     fn new(inner: PinCtrl, fdt_addr: NonNull<u8>) -> Self {
         Self { inner, fdt_addr }
+    }
+
+    /// Set the IOMUX mux function for a single pin.
+    /// `mux` is the raw 4-bit function selector value from the DTS `rockchip,pins` cell.
+    pub(crate) fn set_pin_mux(&mut self, id: PinId, mux: Iomux) -> PinctrlResult<()> {
+        self.inner.set_config(PinConfig {
+            id,
+            mux,
+            pull: Pull::Disabled,
+            drive: None,
+        })
     }
 
     pub(crate) fn enable_fixed_regulator(&mut self, phandle: Phandle) -> Result<(), OnProbeError> {
