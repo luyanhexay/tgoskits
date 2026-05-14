@@ -53,7 +53,31 @@ impl GemPool {
             .map(|data| (data.as_ptr().as_ptr() as usize, data.len()))
     }
 
-    pub fn sync(&mut self, _args: &mut RknpuMemSync) {}
+    pub fn sync(&mut self, args: &mut RknpuMemSync) -> Result<(), RknpuError> {
+        const RKNPU_MEM_SYNC_TO_DEVICE: u32 = 1 << 0;
+        const RKNPU_MEM_SYNC_FROM_DEVICE: u32 = 1 << 1;
+
+        let data = self
+            .pool
+            .values_mut()
+            .find(|d| d.as_ptr().as_ptr() as u64 == args.obj_addr)
+            .ok_or(RknpuError::InvalidParameter)?;
+
+        let offset = args.offset as usize;
+        let size = if args.size == 0 {
+            data.len().saturating_sub(offset)
+        } else {
+            args.size as usize
+        };
+
+        if args.flags & RKNPU_MEM_SYNC_TO_DEVICE != 0 {
+            data.confirm_write(offset, size);
+        }
+        if args.flags & RKNPU_MEM_SYNC_FROM_DEVICE != 0 {
+            data.prepare_read(offset, size);
+        }
+        Ok(())
+    }
 
     pub fn destroy(&mut self, handle: u32) {
         self.pool.remove(&handle);

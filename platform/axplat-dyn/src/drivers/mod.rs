@@ -258,6 +258,37 @@ impl dma_api::DmaOp for DmaImpl {
         }
     }
 
+    fn prepare_read(
+        &self,
+        handle: &dma_api::DmaMapHandle,
+        offset: usize,
+        size: usize,
+        direction: dma_api::DmaDirection,
+    ) {
+        if !matches!(
+            direction,
+            dma_api::DmaDirection::FromDevice | dma_api::DmaDirection::Bidirectional
+        ) {
+            return;
+        }
+
+        let target = unsafe { handle.as_ptr().add(offset) };
+        if let Some(map_virt) = handle.alloc_virt()
+            && map_virt != handle.as_ptr()
+        {
+            let source = unsafe { map_virt.add(offset) };
+            self.invalidate(source, size);
+            unsafe {
+                target
+                    .as_ptr()
+                    .copy_from_nonoverlapping(source.as_ptr(), size);
+            }
+            return;
+        }
+
+        self.invalidate(target, size);
+    }
+
     fn confirm_write(
         &self,
         handle: &dma_api::DmaMapHandle,
