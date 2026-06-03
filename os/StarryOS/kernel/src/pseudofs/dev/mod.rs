@@ -286,27 +286,34 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
     //     GPIO3_B5 → UART3_RX  40-pin header Pin 33  → 接对端 TX
     //
     // !! UART2 (0xFEB50000) 已被板载 Type-C debug 口占用，不可使用 !!
-    let tty_s1 = Arc::new(tty_serial::new_tty_s1(115200));
-    root.add(
-        "ttyS1",
-        Device::new(
-            fs.clone(),
-            NodeType::CharacterDevice,
-            DeviceId::new(4, 65),
-            tty_s1,
-        ),
-    );
+    //
+    // 这两个 ttyS 直接映射 RK3588 真机 UART 的物理地址（0xFEB40000/0xFEB60000）。
+    // 仅在动态平台（真机 OrangePi-5-Plus）上创建：QEMU virt 没有这些 MMIO，
+    // 无条件初始化会在启动期触发 Data Abort。门控与 new_tty_s1 内 pinmux 步骤一致。
+    #[cfg(feature = "plat-dyn")]
+    {
+        let tty_s1 = Arc::new(tty_serial::new_tty_s1(115200));
+        root.add(
+            "ttyS1",
+            Device::new(
+                fs.clone(),
+                NodeType::CharacterDevice,
+                DeviceId::new(4, 65),
+                tty_s1,
+            ),
+        );
 
-    let tty_s3 = Arc::new(tty_serial::new_tty_s3(115200));
-    root.add(
-        "ttyS3",
-        Device::new(
-            fs.clone(),
-            NodeType::CharacterDevice,
-            DeviceId::new(4, 67),
-            tty_s3,
-        ),
-    );
+        let tty_s3 = Arc::new(tty_serial::new_tty_s3(115200));
+        root.add(
+            "ttyS3",
+            Device::new(
+                fs.clone(),
+                NodeType::CharacterDevice,
+                DeviceId::new(4, 67),
+                tty_s3,
+            ),
+        );
+    }
 
     // This is mounted to a tmpfs in `new_procfs`
     root.add(
