@@ -132,6 +132,20 @@ fn collect_disks(block_devs: &mut AxDeviceContainer<AxBlockDevice>) -> Vec<Disco
 
     for (disk_index, mut dev) in block_devs.drain(..).enumerate() {
         let device_name = dev.device_name().to_string();
+        {
+            // [diag] dump raw LBA0 to tell "read corruption" apart from
+            // "parsing/format" issues: a valid MBR ends with 0x55 0xAA at 510.
+            let mut lba0 = alloc::vec![0u8; 512];
+            match dev.read_block(0u64, &mut lba0) {
+                Ok(_) => info!(
+                    "  [diag] {} LBA0 first16={:02x?} sig[510..512]={:02x?}",
+                    device_name,
+                    &lba0[..16],
+                    &lba0[510..512]
+                ),
+                Err(e) => info!("  [diag] {} LBA0 read failed: {:?}", device_name, e),
+            }
+        }
         match scan_partitions(&mut dev) {
             Ok(table) if !table.partitions.is_empty() => {
                 let partitions: Vec<DetectedPartition> = table

@@ -5,7 +5,7 @@ use volatile::VolatilePtr;
 
 use crate::{
     cmd::{Command, DataXfer},
-    regs::{CType, ClkDiv, ClkEna, Cmd, RegisterBlock, RegisterBlockVolatileFieldAccess},
+    regs::{CType, ClkDiv, ClkEna, Cmd, PwrEn, RegisterBlock, RegisterBlockVolatileFieldAccess},
     utils::{Cid, CsdV2},
 };
 
@@ -139,7 +139,7 @@ impl SdMmc {
         let (cmd, arg, xfer) = command.build();
         assert_eq!(cmd.data_expected(), xfer.is_some());
 
-        trace!("send_cmd {cmd:?} {arg:#x?}");
+        info!("send_cmd {cmd:?} {arg:#x?}");
 
         wait_until(|| self.can_send_cmd());
         if cmd.data_expected() {
@@ -211,7 +211,7 @@ impl SdMmc {
         self.regs.rintsts().write(rintsts);
 
         if rintsts.error() {
-            trace!("cmd {} error: {rintsts:?} resp: {resp:?}", cmd.cmd_index());
+            info!("cmd {} error: {rintsts:?} resp: {resp:?}", cmd.cmd_index());
             return Err(SdMmcError::Command(CommandError::new(
                 cmd,
                 rintsts.into(),
@@ -255,8 +255,23 @@ impl SdMmc {
         trace!("bmod: {:?}", self.regs.bmod().read());
         trace!("dbaddr: {:?}", self.regs.dbaddr().read());
 
-        // reset clock to identification frequency (400kHz)
-        self.set_clock(4)?;
+        // Power on card 0. The controller does not power the card by default;
+        // without this the card never drives the CMD line and every
+        // response-expecting command (CMD8 onward) times out. After enabling
+        // power we must wait for the regulator/switch ramp-up before clocking
+        // the card (this crate has no timer, so spin a crude delay).
+        self.regs.pwren().write(PwrEn::new().with_power_enable(1));
+        for _ in 0..500_000 {
+            core::hint::spin_loop();
+        }
+
+        // reset clock to identification frequency (must be <= 400kHz)
+        // dw_mmc: card_clock = ciu_clock / (2 * divider). On RK3588 the SD
+        // controller's source clock (cclk_sdmmc) is left at u-boot's value
+        // (tens~hundreds of MHz; the CRU driver does not reconfigure it), so
+        // divider=4 yielded tens of MHz and CMD8 failed intermittently. Use the
+        // maximum divider to stay under 400kHz for any plausible source clock.
+        self.set_clock(0xff)?;
 
         // set data width -> 1bit
         self.regs.ctype().write(0.into());
@@ -338,11 +353,13 @@ impl SdMmc {
             info!("Switched to 4-bit bus width");
         }
 
-        // Increase clock speed for data transfer
-        // Use divider 0 (bypass) — assumes CRU has already set a reasonable source clock.
-        // Adjust this value based on your SoC's CCLK_SDMMC frequency.
-        self.set_clock(0)?;
-        info!("Switched to high-speed clock (clkdiv=0)");
+        // Increase clock speed for data transfer.
+        // divider 0 (bypass) makes card_clock == source clock, which on RK3588
+        // is left at u-boot's value (~150-200MHz) — far above the SD
+        // default/high-speed limit (25/50MHz) and corrupts every data read.
+        // Use divider 4 to stay around/below 25MHz for any plausible source.
+        self.set_clock(4)?;
+        info!("Switched to data-transfer clock (clkdiv=4)");
 
         info!("SD/MMC driver initialized");
         Ok(())
