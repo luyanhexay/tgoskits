@@ -56,6 +56,23 @@ fn probe(probe: ProbeFdt<'_>) -> Result<(), OnProbeError> {
 
     info!("NPU power enabled");
 
+    // Raise the NPU compute clock (clk_npu, an SCMI clock) to its rated max.
+    // Without this it stays at the boot-default low rate, making rknn_run ~20x
+    // slower than spec. Same SCMI set-rate path the dwmmc driver uses.
+    const NPU_MAX_HZ: u64 = 1_000_000_000; // opp-1000000000, RK3588 NPU max
+    if let Some(clk) = info.find_clk_by_name("clk_npu") {
+        let clock_id = clk.select().unwrap_or(0);
+        match crate::soc::scmi::set_clock_rate(clk.phandle, clock_id, NPU_MAX_HZ) {
+            Some(()) => {
+                let got = crate::soc::scmi::clock_rate(clk.phandle, clock_id).unwrap_or(0);
+                info!("NPU clk_npu set to {} Hz (read back {} Hz)", NPU_MAX_HZ, got);
+            }
+            None => log::warn!("failed to set NPU clk_npu to {} Hz", NPU_MAX_HZ),
+        }
+    } else {
+        log::warn!("NPU clk_npu not found in FDT; NPU clock left at boot default");
+    }
+
     let dma = axklib::dma::device_with_mask(u32::MAX as u64);
     let npu = Rknpu::new(&base_regs, config, dma);
     plat_dev.register(npu);
