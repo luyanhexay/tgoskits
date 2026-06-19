@@ -54,17 +54,16 @@ impl Ext4Filesystem {
                 );
                 Self::mount_readonly_no_replay(dev)?
             }
-            Ok(false) => match rsext4::mount(&mut dev) {
-                Ok(fs) => (fs, dev, false),
-                Err(err) if err.code == Errno::EUCLEAN => {
-                    warn!(
-                        "ext4 journal replay failed with EUCLEAN; retrying read-only without \
-                         journal replay"
-                    );
-                    Self::mount_readonly_no_replay(dev)?
-                }
-                Err(err) => return Err(into_vfs_err(err)),
-            },
+            // [rk3588-contest debug] Force read-only mount to skip the mount-time
+            // sync writeback (rsext4 mount.rs:472). On real RK3588 hardware the first
+            // SD WRITE hangs: write completion is IRQ-driven and the CMD12 R1b
+            // busy-clear interrupt never wakes the parked writer task (read works,
+            // write doesn't). Read-only rootfs is enough to reach a shell + run NPU.
+            // Proper fix = write-completion IRQ wake chain. Revert when fixed.
+            Ok(false) => {
+                warn!("ext4: forcing read-only mount (rk3588 SD-write-hang workaround)");
+                Self::mount_readonly_no_replay(dev)?
+            }
             Err(err) if err.code == Errno::EUCLEAN => {
                 warn!(
                     "ext4 superblock check failed with EUCLEAN; retrying read-only without \
