@@ -166,10 +166,10 @@ impl DeviceOps for Card1 {
             return Err(VfsError::InvalidData);
         }
         let nr = ioctl_nr(cmd);
-        info!("card1: cmd {cmd:#x}, nr {nr:#x}, arg {arg:#x}");
+        debug!("card1: cmd {cmd:#x}, nr {nr:#x}, arg {arg:#x}");
 
         let is_driver_ioctl = is_driver_ioctl(ioctl_nr(cmd));
-        info!("card1: is_driver_ioctl = {}", is_driver_ioctl);
+        debug!("card1: is_driver_ioctl = {}", is_driver_ioctl);
 
         if is_driver_ioctl {
             if let Ok(op) = RknpuCmd::try_from(nr) {
@@ -188,11 +188,11 @@ impl DeviceOps for Card1 {
             copy_from_user(stack_data.as_mut_ptr(), arg as _, in_size)?;
             match nr {
                 DRM_IOCTL_VERSION_NR => {
-                    info!("drm get version");
+                    debug!("drm get version");
                     drm_version(&mut stack_data)?;
                 }
                 DRM_IOCTL_GET_UNIQUE_NR => {
-                    info!("drm get unique");
+                    debug!("drm get unique");
                     drm_get_unique(&mut stack_data)?;
                 }
                 DRM_IOCTL_GEM_FLINK_NR => {
@@ -322,7 +322,7 @@ pub fn copy_to_user(dst: *mut u8, src: *const u8, size: usize) -> Result<(), Vfs
 
 /// Handles RKNPU action ioctl commands
 pub fn rknpu_driver_ioctl(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
-    info!("rknpu_driver_ioctl: op = {:?}", op);
+    debug!("rknpu_driver_ioctl: op = {:?}", op);
     match op {
         RknpuCmd::Submit => {
             let mut submit_args = RknpuSubmit::default();
@@ -333,7 +333,7 @@ pub fn rknpu_driver_ioctl(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
             )?;
             let log_index = RKNPU_SUBMIT_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
             if log_index < RKNPU_SUBMIT_LOG_LIMIT {
-                warn!(
+                debug!(
                     "rknpu submit ioctl[{log_index}]: flags={:#x} timeout={} task_start={} \
                      task_number={} task_counter={} core_mask={:#x} task_obj_addr={:#x} \
                      task_base_addr={:#x} subcore_task={:?}",
@@ -348,14 +348,14 @@ pub fn rknpu_driver_ioctl(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
                     submit_args.subcore_task
                 );
             }
-            info!("rknpu submit ioctl {submit_args:#x?}");
+            debug!("rknpu submit ioctl {submit_args:#x?}");
 
             let submit_start_ns = monotonic_time_nanos();
             match rknpu::submit(&mut submit_args).map_err(map_rknpu_err) {
                 Ok(()) => {
                     let submit_end_ns = monotonic_time_nanos();
                     if log_index < RKNPU_SUBMIT_LOG_LIMIT {
-                        warn!(
+                        debug!(
                             "rknpu submit ioctl[{log_index}] done: task_counter={} \
                              hw_elapse_time={} core_mask={:#x} elapsed_us={}",
                             submit_args.task_counter,
@@ -389,7 +389,7 @@ pub fn rknpu_driver_ioctl(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
             )?;
         }
         RknpuCmd::MemCreate => {
-            info!("rknpu mem_create ioctl");
+            debug!("rknpu mem_create ioctl");
             let mut mem_create_args = RknpuMemCreate::default();
 
             copy_from_user(
@@ -400,7 +400,7 @@ pub fn rknpu_driver_ioctl(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
 
             let log_index = RKNPU_MEM_CREATE_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
             if log_index < RKNPU_MEM_CREATE_LOG_LIMIT {
-                warn!(
+                debug!(
                     "rknpu mem_create ioctl[{log_index}]: flags={:#x} size={} core_mask={:#x}",
                     mem_create_args.flags, mem_create_args.size, mem_create_args.core_mask
                 );
@@ -411,7 +411,7 @@ pub fn rknpu_driver_ioctl(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
                 Ok(()) => {
                     let create_end_ns = monotonic_time_nanos();
                     if log_index < RKNPU_MEM_CREATE_LOG_LIMIT {
-                        warn!(
+                        debug!(
                             "rknpu mem_create ioctl[{log_index}] done: handle={} flags={:#x} \
                              size={} sram_size={} obj_addr={:#x} dma_addr={:#x} \
                              iommu_domain_id={} core_mask={:#x} elapsed_us={}",
@@ -450,7 +450,7 @@ pub fn rknpu_driver_ioctl(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
             )?;
         }
         RknpuCmd::MemMap => {
-            info!("rknpu mem_map ioctl");
+            debug!("rknpu mem_map ioctl");
             let mut mem_map = RknpuMemMap::default();
             copy_from_user(
                 &mut mem_map as *mut _ as *mut u8,
@@ -461,7 +461,7 @@ pub fn rknpu_driver_ioctl(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
             match rknpu::mem_map_offset(mem_map.handle).map_err(map_rknpu_err) {
                 Ok(offset) => {
                     mem_map.offset = offset;
-                    info!(
+                    debug!(
                         "mem_map: handle={} -> offset=0x{:x}",
                         mem_map.handle, mem_map.offset
                     );
@@ -480,7 +480,7 @@ pub fn rknpu_driver_ioctl(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
             )?;
         }
         RknpuCmd::MemDestroy => {
-            info!("rknpu mem_destroy ioctl");
+            debug!("rknpu mem_destroy ioctl");
         }
         RknpuCmd::MemSync => {
             let mut mem_sync = RknpuMemSync::default();
@@ -491,20 +491,20 @@ pub fn rknpu_driver_ioctl(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
             )?;
             let log_index = RKNPU_MEM_SYNC_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
             if log_index < RKNPU_MEM_SYNC_LOG_LIMIT {
-                warn!(
+                debug!(
                     "rknpu mem_sync ioctl[{log_index}]: flags={:#x} obj_addr={:#x} offset={} \
                      size={}",
                     mem_sync.flags, mem_sync.obj_addr, mem_sync.offset, mem_sync.size
                 );
             }
-            info!("rknpu mem_sync ioctl {mem_sync:#x?}");
+            debug!("rknpu mem_sync ioctl {mem_sync:#x?}");
 
             let sync_start_ns = monotonic_time_nanos();
             match rknpu::mem_sync(&mut mem_sync).map_err(map_rknpu_err) {
                 Ok(()) => {
                     let sync_end_ns = monotonic_time_nanos();
                     if log_index < RKNPU_MEM_SYNC_LOG_LIMIT {
-                        warn!(
+                        debug!(
                             "rknpu mem_sync ioctl[{log_index}] done: flags={:#x} offset={} \
                              size={} elapsed_us={}",
                             mem_sync.flags,
@@ -538,7 +538,7 @@ pub fn rknpu_driver_ioctl(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
             )?;
         }
         RknpuCmd::Action => {
-            info!("rknpu action ioctl");
+            debug!("rknpu action ioctl");
             let mut action = RknpuUserAction::default();
             copy_from_user(
                 &mut action as *mut _ as *mut u8,
@@ -548,7 +548,7 @@ pub fn rknpu_driver_ioctl(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
 
             let log_index = RKNPU_ACTION_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
             let value_in = action.value;
-            info!(
+            debug!(
                 "rknpu action ioctl: flags = {:?}, value = {}",
                 action.flags, action.value
             );
@@ -557,7 +557,7 @@ pub fn rknpu_driver_ioctl(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
                 Ok(val) => {
                     action.value = val;
                     if log_index < RKNPU_ACTION_LOG_LIMIT {
-                        warn!(
+                        debug!(
                             "rknpu action ioctl[{log_index}]: flags={:?} value_in={} \
                              result=Ok({}) value_out={}",
                             action.flags, value_in, val, action.value
@@ -599,7 +599,7 @@ struct DrmGemFlink {
 /// Handles DRM GEM flink ioctl command
 fn drm_gem_flink_ioctl(data: &mut [u8]) -> VfsResult<usize> {
     let data = unsafe { &mut *(data.as_mut_ptr() as *mut DrmGemFlink) };
-    info!("drm_gem_flink_ioctl called: {:#?}", data);
+    debug!("drm_gem_flink_ioctl called: {:#?}", data);
     Err(VfsError::NotFound)
 }
 
@@ -618,7 +618,7 @@ struct DrmPrimeHande {
 /// Handles DRM prime handle to fd ioctl command
 fn drm_prime_handle_to_fd_ioctl(data: &mut [u8]) -> VfsResult<usize> {
     let data = unsafe { &mut *(data.as_mut_ptr() as *mut DrmPrimeHande) };
-    info!("drm_prime_handle_to_fd_ioctl {data:#x?}");
+    debug!("drm_prime_handle_to_fd_ioctl {data:#x?}");
     let exported = exported_gem_buffer(data.handle).map_err(|err| {
         warn!(
             "drm_prime_handle_to_fd_ioctl: invalid handle {}: {err}",
@@ -716,7 +716,7 @@ mod tests {
 /// Sets the DRM version information for the device
 pub fn drm_version(data: &mut [u8]) -> VfsResult<()> {
     let data = unsafe { &mut *(data.as_mut_ptr() as *mut DrmVersion) };
-    info!("drm_version called: {:?}", data);
+    debug!("drm_version called: {:?}", data);
 
     // Set version information
     data.version_major = 0;
@@ -759,7 +759,7 @@ pub fn drm_version(data: &mut [u8]) -> VfsResult<()> {
         }
     }
 
-    info!(
+    debug!(
         "[drm_version] Set driver info: name_len={}, date_len={}, desc_len={}",
         data.name_len, data.date_len, data.desc_len
     );
@@ -773,7 +773,7 @@ pub fn drm_version(data: &mut [u8]) -> VfsResult<()> {
 /// identifier for the DRM device (typically a bus ID or similar identifier).
 pub fn drm_get_unique(data: &mut [u8]) -> VfsResult<()> {
     let unique_data = unsafe { &mut *(data.as_mut_ptr() as *mut DrmUnique) };
-    info!("drm_get_unique called: {:?}", unique_data);
+    debug!("drm_get_unique called: {:?}", unique_data);
 
     unique_data.unique_len = 0;
 
