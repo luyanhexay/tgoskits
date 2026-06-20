@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 use core::{
     hint::spin_loop,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use tock_registers::interfaces::Readable;
@@ -14,6 +14,61 @@ use crate::{
 const RKNN_NPU_CORE_ALL: u32 = 0xffff;
 const RKNPU_SYNC_POLL_LOG_INTERVAL: u64 = 1_000_000;
 static LOGGED_SUBMIT_CORE_LAYOUT: AtomicBool = AtomicBool::new(false);
+
+// EXEC-2 diagnostic: timestamped submit timeline for the first N submits, to
+// decide whether rknn_run's ~210 ms is NPU hardware busy time (kick->complete)
+// or pre-/post-kick software overhead. Printed ONCE per submit (NOT in the poll
+// loop), only for the first SUBMIT_TIMELINE_SAMPLES submits, then silent — so it
+// never pollutes the measured (post-warmup) runs.
+const SUBMIT_TIMELINE_SAMPLES: u64 = 16;
+static SUBMIT_TIMELINE_COUNT: AtomicU64 = AtomicU64::new(0);
+
+// EXEC-2 duty-cycle: cumulative in-kernel busy time vs wall time, to settle
+// "NPU hardware-bound vs software/runtime-bound". G_BUSY_US accumulates
+// kick->complete (NPU busy-poll) across ALL submits; G_EPOCH is the cntvct at
+// the first submit; a summary line every CUM_PRINT_EVERY submits reports
+// cumulative busy time and elapsed wall time, so duty = Δbusy/Δwall. The
+// summary is rare (every 256 submits) so it does not pollute measured runs.
+const CUM_PRINT_EVERY: u64 = 256;
+static G_SUBMIT_COUNT: AtomicU64 = AtomicU64::new(0);
+static G_BUSY_US: AtomicU64 = AtomicU64::new(0);
+static G_KICK_US: AtomicU64 = AtomicU64::new(0);
+static G_EPOCH_TICKS: AtomicU64 = AtomicU64::new(0);
+
+/// Read the AArch64 virtual count-timer (`CNTVCT_EL0`). This is a CPU system
+/// register, not an OS service, so reading it keeps this crate OS-independent.
+/// On non-aarch64 hosts (unit tests) it returns 0.
+#[inline]
+fn read_cntvct() -> u64 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let v: u64;
+        // SAFETY: CNTVCT_EL0 is always readable at EL1/EL0; no memory access.
+        unsafe { core::arch::asm!("mrs {}, cntvct_el0", out(reg) v, options(nomem, nostack)) };
+        v
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        0
+    }
+}
+
+/// Read the timer frequency (`CNTFRQ_EL0`, Hz) for tick->us conversion. Returns
+/// 1 on non-aarch64 to avoid division by zero in tests.
+#[inline]
+fn read_cntfrq() -> u64 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let v: u64;
+        // SAFETY: CNTFRQ_EL0 is always readable; no memory access.
+        unsafe { core::arch::asm!("mrs {}, cntfrq_el0", out(reg) v, options(nomem, nostack)) };
+        if v == 0 { 1 } else { v }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        1
+    }
+}
 
 /// 子核心任务索引结构体
 ///
@@ -167,6 +222,7 @@ fn subcore_task_index(use_core_num: usize, core_idx: usize) -> usize {
 
 impl Rknpu {
     pub fn submit_ioctrl(&mut self, args: &mut RknpuSubmit) -> Result<(), RknpuError> {
+        let t_enter = read_cntvct();
         if args.flags & 1 << 1 > 0 {
             debug!("Nonblock task");
         }
@@ -249,6 +305,7 @@ impl Rknpu {
             self.clear_pending_interrupts(state.core_idx)?;
             self.submit_next_chunk(state, args)?;
         }
+        let t_kick = read_cntvct();
 
         let mut wait_count: u64 = 0;
         while states.iter().any(|state| state.inflight) {
@@ -269,9 +326,65 @@ impl Rknpu {
                 spin_loop();
             }
         }
+        let t_complete = read_cntvct();
 
         args.task_counter = args.task_number;
         args.hw_elapse_time = (args.timeout / 2) as _;
+
+        // EXEC-2 timeline + duty-cycle, printed here (after the poll loop, never
+        // inside it). enter->kick = validate + register-program cost;
+        // kick->complete = NPU hardware busy-wait.
+        let frq = read_cntfrq();
+        let us = |ticks: u64| ticks.saturating_mul(1_000_000) / frq;
+        let kick_us = us(t_kick.wrapping_sub(t_enter));
+        let busy_us = us(t_complete.wrapping_sub(t_kick));
+
+        // Per-submit detail for the first N submits.
+        let sample = SUBMIT_TIMELINE_COUNT.fetch_add(1, Ordering::Relaxed);
+        if sample < SUBMIT_TIMELINE_SAMPLES {
+            info!(
+                "rknpu timeline[{}]: core_mask={:#x} cores={} tasks={} | enter->kick={}us \
+                 kick->complete={}us total={}us (cntfrq={}Hz)",
+                sample,
+                core_mask,
+                use_core_num,
+                args.task_number,
+                kick_us,
+                busy_us,
+                kick_us + busy_us,
+                frq,
+            );
+        }
+
+        // Cumulative duty-cycle. duty = busy_sum / wall_elapsed between two
+        // summaries reveals whether the NPU is busy the whole time (hardware
+        // bound) or idle between submits (software/runtime bound).
+        G_EPOCH_TICKS
+            .compare_exchange(0, t_enter, Ordering::Relaxed, Ordering::Relaxed)
+            .ok();
+        G_BUSY_US.fetch_add(busy_us, Ordering::Relaxed);
+        G_KICK_US.fetch_add(kick_us, Ordering::Relaxed);
+        let n = G_SUBMIT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        if n.is_multiple_of(CUM_PRINT_EVERY) {
+            let epoch = G_EPOCH_TICKS.load(Ordering::Relaxed);
+            let wall_us = us(t_complete.wrapping_sub(epoch));
+            let busy_sum = G_BUSY_US.load(Ordering::Relaxed);
+            let kick_sum = G_KICK_US.load(Ordering::Relaxed);
+            let duty_permille = if wall_us > 0 {
+                busy_sum.saturating_mul(1000) / wall_us
+            } else {
+                0
+            };
+            info!(
+                "rknpu cum: submits={} busy_us={} kick_us={} wall_us={} npu_duty={}.{}%",
+                n,
+                busy_sum,
+                kick_sum,
+                wall_us,
+                duty_permille / 10,
+                duty_permille % 10,
+            );
+        }
 
         Ok(())
     }

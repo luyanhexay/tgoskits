@@ -76,7 +76,10 @@ fn probe(probe: ProbeFdt<'_>) -> Result<(), OnProbeError> {
         match crate::soc::scmi::set_clock_rate(clk.phandle, clock_id, NPU_MAX_HZ) {
             Some(()) => {
                 let got = crate::soc::scmi::clock_rate(clk.phandle, clock_id).unwrap_or(0);
-                info!("NPU clk_npu set to {} Hz (read back {} Hz)", NPU_MAX_HZ, got);
+                info!(
+                    "NPU clk_npu set to {} Hz (read back {} Hz)",
+                    NPU_MAX_HZ, got
+                );
             }
             None => log::warn!("failed to set NPU clk_npu to {} Hz", NPU_MAX_HZ),
         }
@@ -102,6 +105,32 @@ fn probe(probe: ProbeFdt<'_>) -> Result<(), OnProbeError> {
             );
         }
         Err(err) => log::warn!("set CLK_NPU_DSU0 failed: {:?}", err),
+    }
+
+    // (D) EXEC-2 read-only bus/control clock snapshot. The NPU YOLO load is
+    //     memory-bandwidth heavy and the core-mask matrix showed adding cores
+    //     does NOT change rknn_run time (not PE-compute-bound) — so the AXI data
+    //     clock (aclk0/1/2) is the prime suspect. We only ever raised clk_npu /
+    //     DSU0 (compute); these data/control clocks were never touched. Read-only,
+    //     no writes. CRU ids: ACLK_NPU0=301 ACLK_NPU1=290 ACLK_NPU2=292
+    //     HCLK_NPU_ROOT=303 PCLK_NPU_ROOT=305. NOTE: npu_get_rate() currently has
+    //     no decode for ACLK_NPU*, so those are expected to log an error — that
+    //     gap (cannot observe the bandwidth-critical clock) is itself a finding.
+    const NPU_CLK_SNAPSHOT: [(&str, u32); 5] = [
+        ("ACLK_NPU0", 301),
+        ("ACLK_NPU1", 290),
+        ("ACLK_NPU2", 292),
+        ("HCLK_NPU_ROOT", 303),
+        ("PCLK_NPU_ROOT", 305),
+    ];
+    for (name, id) in NPU_CLK_SNAPSHOT {
+        match crate::soc::rk3588_get_clock_rate(id) {
+            Ok(hz) => info!("NPU clock snapshot: {} (id {}) = {} Hz", name, id, hz),
+            Err(err) => info!(
+                "NPU clock snapshot: {} (id {}) = <unreadable: {:?}>",
+                name, id, err
+            ),
+        }
     }
     // ===== end NPU DVFS diagnostics =====
 

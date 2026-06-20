@@ -35,9 +35,9 @@ impl ClkDrv {
     }
 
     fn get_clock_rate(&self, id: u32) -> Result<u64, OnProbeError> {
-        self.inner.clk_get_rate(ClkId::from(id)).map_err(|err| {
-            OnProbeError::other(alloc::format!("failed to get clock {id}: {err}"))
-        })
+        self.inner
+            .clk_get_rate(ClkId::from(id))
+            .map_err(|err| OnProbeError::other(alloc::format!("failed to get clock {id}: {err}")))
     }
 
     fn reset_assert(&mut self, id: u64) {
