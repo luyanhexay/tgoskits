@@ -34,6 +34,12 @@ impl ClkDrv {
         Ok(())
     }
 
+    fn get_clock_rate(&self, id: u32) -> Result<u64, OnProbeError> {
+        self.inner.clk_get_rate(ClkId::from(id)).map_err(|err| {
+            OnProbeError::other(alloc::format!("failed to get clock {id}: {err}"))
+        })
+    }
+
     fn reset_assert(&mut self, id: u64) {
         self.inner.reset_assert(id.into());
     }
@@ -96,6 +102,10 @@ pub fn rk3588_enable_clock(id: u32) -> Result<(), OnProbeError> {
 
 pub fn rk3588_set_clock_rate(id: u32, rate: u64) -> Result<(), OnProbeError> {
     with_clk_drv(|drv| drv.set_clock_rate(id, rate))
+}
+
+pub fn rk3588_get_clock_rate(id: u32) -> Result<u64, OnProbeError> {
+    with_clk_drv(|drv| drv.get_clock_rate(id))
 }
 
 pub fn rk3588_reset_assert(id: u64) -> Result<(), OnProbeError> {

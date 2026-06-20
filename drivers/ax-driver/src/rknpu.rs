@@ -56,12 +56,23 @@ fn probe(probe: ProbeFdt<'_>) -> Result<(), OnProbeError> {
 
     info!("NPU power enabled");
 
-    // Raise the NPU compute clock (clk_npu, an SCMI clock) to its rated max.
-    // Without this it stays at the boot-default low rate, making rknn_run ~20x
-    // slower than spec. Same SCMI set-rate path the dwmmc driver uses.
+    // ===== NPU DVFS diagnostics — one-shot board experiment =====
+    // rknn_run is ~812 ms (should be ~tens of ms). clk_npu set to 1 GHz via SCMI
+    // reads back 1 GHz but gives ZERO speedup. This block gathers, in a single
+    // boot, the data that decides the DVFS implementation path. See
+    // docs/上板调试日志 §23.
+
+    // (A) Which SCMI protocols does the platform firmware (ATF) actually expose?
+    //     PERF (0x13) present  -> voltage-coupled DVFS is possible over SCMI.
+    //     Only CLOCK (0x14)    -> real DVFS must drive the RK8602 regulator (I2C).
+    crate::soc::scmi::log_supported_protocols();
+
+    // (B) clk_npu (SCMI clock id 6): log boot-default, raise to OPP max, confirm.
     const NPU_MAX_HZ: u64 = 1_000_000_000; // opp-1000000000, RK3588 NPU max
     if let Some(clk) = info.find_clk_by_name("clk_npu") {
         let clock_id = clk.select().unwrap_or(0);
+        let before = crate::soc::scmi::clock_rate(clk.phandle, clock_id).unwrap_or(0);
+        info!("NPU clk_npu boot-default = {} Hz", before);
         match crate::soc::scmi::set_clock_rate(clk.phandle, clock_id, NPU_MAX_HZ) {
             Some(()) => {
                 let got = crate::soc::scmi::clock_rate(clk.phandle, clock_id).unwrap_or(0);
@@ -72,6 +83,27 @@ fn probe(probe: ProbeFdt<'_>) -> Result<(), OnProbeError> {
     } else {
         log::warn!("NPU clk_npu not found in FDT; NPU clock left at boot default");
     }
+
+    // (C) CRU data/compute clock CLK_NPU_DSU0 (id 304, max 1188 MHz): this is the
+    //     CRU-settable NPU clock (plain MMIO, no ATF arbitration). If raising it
+    //     speeds up rknn_run, the data clock — not the SCMI clk_npu — is the lever.
+    const CLK_NPU_DSU0: u32 = 304;
+    const NPU_DSU0_MAX_HZ: u64 = 1_188_000_000;
+    match crate::soc::rk3588_get_clock_rate(CLK_NPU_DSU0) {
+        Ok(hz) => info!("NPU CLK_NPU_DSU0 boot-default = {} Hz", hz),
+        Err(err) => log::warn!("read CLK_NPU_DSU0 failed: {:?}", err),
+    }
+    match crate::soc::rk3588_set_clock_rate(CLK_NPU_DSU0, NPU_DSU0_MAX_HZ) {
+        Ok(()) => {
+            let got = crate::soc::rk3588_get_clock_rate(CLK_NPU_DSU0).unwrap_or(0);
+            info!(
+                "NPU CLK_NPU_DSU0 set to {} Hz (read back {} Hz)",
+                NPU_DSU0_MAX_HZ, got
+            );
+        }
+        Err(err) => log::warn!("set CLK_NPU_DSU0 failed: {:?}", err),
+    }
+    // ===== end NPU DVFS diagnostics =====
 
     let dma = axklib::dma::device_with_mask(u32::MAX as u64);
     let npu = Rknpu::new(&base_regs, config, dma);

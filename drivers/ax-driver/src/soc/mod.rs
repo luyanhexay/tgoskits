@@ -21,8 +21,8 @@ mod sg2002;
 
 #[cfg(feature = "rockchip-soc")]
 pub use rockchip::{
-    RockchipPinCtrl, rk3588_enable_clock, rk3588_enable_power_domain, rk3588_reset_assert,
-    rk3588_reset_deassert, rk3588_set_clock_rate,
+    RockchipPinCtrl, rk3588_enable_clock, rk3588_enable_power_domain, rk3588_get_clock_rate,
+    rk3588_reset_assert, rk3588_reset_deassert, rk3588_set_clock_rate,
 };
 
 #[cfg(not(feature = "rockchip-soc"))]
@@ -36,6 +36,13 @@ pub fn rk3588_enable_clock(id: u32) -> Result<(), rdrive::probe::OnProbeError> {
 pub fn rk3588_set_clock_rate(id: u32, rate_hz: u64) -> Result<(), rdrive::probe::OnProbeError> {
     Err(rdrive::probe::OnProbeError::other(alloc::format!(
         "RK3588 clock support is not enabled for clock {id:#x} rate {rate_hz}"
+    )))
+}
+
+#[cfg(not(feature = "rockchip-soc"))]
+pub fn rk3588_get_clock_rate(id: u32) -> Result<u64, rdrive::probe::OnProbeError> {
+    Err(rdrive::probe::OnProbeError::other(alloc::format!(
+        "RK3588 clock support is not enabled for clock {id:#x}"
     )))
 }
 

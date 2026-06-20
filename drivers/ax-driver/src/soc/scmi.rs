@@ -136,6 +136,41 @@ pub fn set_clock_rate(_phandle: Phandle, clock_id: u32, rate: u64) -> Option<()>
     }
 }
 
+/// Log the list of SCMI protocols the platform firmware (ATF) actually exposes.
+///
+/// This decides the NPU DVFS implementation path: if PERF (0x13) is present we
+/// can drive voltage-coupled DVFS over SCMI; if only CLOCK (0x14) is exposed,
+/// real DVFS must drive the NPU regulator (RK8602 over I2C) directly.
+pub fn log_supported_protocols() {
+    if !SCMI_REGISTERED.load(Ordering::Acquire) {
+        warn!("SCMI protocol list requested before SCMI registration");
+        return;
+    }
+    let mut guard = SCMI.lock();
+    let Some(scmi) = guard.as_mut() else {
+        return;
+    };
+    let mut base = scmi.protocol_base();
+    match base.discover_list_protocols(0) {
+        Ok(protocols) => {
+            info!("SCMI supported protocols (raw bytes): {:?}", protocols);
+            let has = |p: u8| protocols.contains(&p);
+            info!(
+                "SCMI protocols decoded: CLOCK(0x14)={} PERF(0x13)={} POWER(0x11)={} \
+                 SYSTEM(0x12)={} SENSOR(0x15)={} RESET(0x16)={} VOLTAGE(0x17)={}",
+                has(0x14),
+                has(0x13),
+                has(0x11),
+                has(0x12),
+                has(0x15),
+                has(0x16),
+                has(0x17),
+            );
+        }
+        Err(err) => warn!("SCMI discover_list_protocols failed: {:?}", err),
+    }
+}
+
 struct ScmiDevice;
 
 impl DriverGeneric for ScmiDevice {

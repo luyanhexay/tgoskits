@@ -23,7 +23,8 @@ mod pinctrl;
 
 #[cfg(feature = "rockchip-soc")]
 pub use clk::{
-    rk3588_enable_clock, rk3588_reset_assert, rk3588_reset_deassert, rk3588_set_clock_rate,
+    rk3588_enable_clock, rk3588_get_clock_rate, rk3588_reset_assert, rk3588_reset_deassert,
+    rk3588_set_clock_rate,
 };
 #[cfg(feature = "rockchip-soc")]
 pub use pinctrl::RockchipPinCtrl;
