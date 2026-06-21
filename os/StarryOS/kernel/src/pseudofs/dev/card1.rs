@@ -78,6 +78,23 @@ static RKNPU_CMD_COUNT: [AtomicU64; RKNPU_CMD_KINDS] =
     [const { AtomicU64::new(0) }; RKNPU_CMD_KINDS];
 static RKNPU_CMD_NS: [AtomicU64; RKNPU_CMD_KINDS] = [const { AtomicU64::new(0) }; RKNPU_CMD_KINDS];
 
+// EXEC-4c: per-inference "burst" timer + mid-run frequency raise, to measure the
+// CPU-frequency speedup before/after within a SINGLE boot (no loop/transfer, just
+// reliable single npu_smoke runs). librknnrt issues ~53 submits clustered inside
+// one rknn_run, then a longer gap (outputs_get/inputs_set/init). We time each
+// cluster's first→last submit span — freq-sensitive, since the inter-submit
+// userspace gaps shrink as the CPU speeds up — and print it when the next cluster
+// starts. After RAISE_AFTER_SUBMITS submits (~1 inference at boot freq) we raise
+// the A76 clusters to max and re-probe, so successive bursts print slow (boot
+// freq) then fast (raised).
+const BURST_GAP_NS: u64 = 30_000_000; // >30ms idle between submits ⇒ inference boundary
+const RAISE_AFTER_SUBMITS: u64 = 60;
+static SUBMIT_LAST_NS: AtomicU64 = AtomicU64::new(0);
+static SUBMIT_BURST_START_NS: AtomicU64 = AtomicU64::new(0);
+static SUBMIT_BURST_COUNT: AtomicU64 = AtomicU64::new(0);
+static SUBMIT_TOTAL: AtomicU64 = AtomicU64::new(0);
+static FREQ_RAISED: AtomicBool = AtomicBool::new(false);
+
 /// Human-readable name for an `RknpuCmd` discriminant, for the EXEC-3 summary.
 fn rknpu_cmd_name(idx: usize) -> &'static str {
     match idx {
@@ -107,6 +124,39 @@ fn account_rknpu_ioctl(op: RknpuCmd, entry_ns: u64, exit_ns: u64) {
     if last_exit != 0 && entry_ns > last_exit {
         RKNPU_GAP_NS.fetch_add(entry_ns - last_exit, Ordering::Relaxed);
         RKNPU_GAP_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+
+    // EXEC-4c: per-inference burst timing + mid-run frequency raise (Submit only).
+    if op == RknpuCmd::Submit {
+        let last = SUBMIT_LAST_NS.swap(entry_ns, Ordering::Relaxed);
+        if last == 0 {
+            SUBMIT_BURST_START_NS.store(entry_ns, Ordering::Relaxed);
+            SUBMIT_BURST_COUNT.store(1, Ordering::Relaxed);
+        } else if entry_ns.saturating_sub(last) > BURST_GAP_NS {
+            // Previous cluster ended at `last`; report its first→last span.
+            let cnt = SUBMIT_BURST_COUNT.swap(1, Ordering::Relaxed);
+            let start = SUBMIT_BURST_START_NS.swap(entry_ns, Ordering::Relaxed);
+            if cnt >= 10 {
+                let span_us = last.saturating_sub(start) / 1000;
+                warn!(
+                    "rknn burst: {} submits span {} us ({} us/submit)",
+                    cnt,
+                    span_us,
+                    span_us / cnt
+                );
+            }
+        } else {
+            SUBMIT_BURST_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+
+        // After ~1 inference at the boot clock, raise the A76 clusters once and
+        // re-probe, so later bursts print at the raised clock — before/after in
+        // one boot.
+        let sn = SUBMIT_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+        if sn >= RAISE_AFTER_SUBMITS && !FREQ_RAISED.swap(true, Ordering::Relaxed) {
+            rknpu::set_cpu_clusters_max();
+            measure_and_log_cpu_mhz();
+        }
     }
 
     let n = RKNPU_IOCTL_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
@@ -470,12 +520,9 @@ fn measure_and_log_cpu_mhz() {}
 /// and folds the result into the cumulative partition.
 pub fn rknpu_driver_ioctl(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
     if !CPU_MHZ_PROBED.swap(true, Ordering::Relaxed) {
-        // EXEC-4b: raise the A76 clusters to 2.4GHz *before* the probe, so the
-        // probe re-measures the raised clock and confirms the change took effect
-        // (should now read ~2400 vs the ~1209 of EXEC-4 §31). Done on the first
-        // NPU ioctl (inference start), not at boot, so a failed SCMI set cannot
-        // wedge boot.
-        rknpu::set_cpu_clusters_max();
+        // EXEC-4c: probe the BOOT clock here (~1209 of §31). The raise to max now
+        // happens mid-run (after RAISE_AFTER_SUBMITS submits, in account_rknpu_ioctl)
+        // so one boot captures the before/after burst timing.
         measure_and_log_cpu_mhz();
     }
     let entry_ns = monotonic_time_nanos();

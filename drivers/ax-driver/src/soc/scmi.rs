@@ -153,9 +153,9 @@ pub fn log_supported_protocols() {
     let mut base = scmi.protocol_base();
     match base.discover_list_protocols(0) {
         Ok(protocols) => {
-            info!("SCMI supported protocols (raw bytes): {:?}", protocols);
+            warn!("SCMI supported protocols (raw bytes): {:?}", protocols);
             let has = |p: u8| protocols.contains(&p);
-            info!(
+            warn!(
                 "SCMI protocols decoded: CLOCK(0x14)={} PERF(0x13)={} POWER(0x11)={} \
                  SYSTEM(0x12)={} SENSOR(0x15)={} RESET(0x16)={} VOLTAGE(0x17)={}",
                 has(0x14),

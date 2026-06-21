@@ -174,9 +174,12 @@ pub fn set_cpu_clusters_max() {
             Some(()) => {
                 let after =
                     crate::soc::scmi::clock_rate(fdt_edit::Phandle::from(0u32), id).unwrap_or(0);
-                info!(
+                log::warn!(
                     "EXEC-4b: {} (scmi clk {}) {} -> {} Hz",
-                    name, id, before, after
+                    name,
+                    id,
+                    before,
+                    after
                 );
             }
             None => log::warn!(
