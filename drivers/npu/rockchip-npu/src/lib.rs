@@ -141,7 +141,7 @@ impl Rknpu {
 
     pub fn clear_rw_amount(&mut self) -> Result<(), RknpuError> {
         let Some(amount_top) = self.data.amount_top else {
-            warn!("RKNPU does not support read/write amount statistics");
+            debug!("RKNPU does not support read/write amount statistics");
             return Ok(());
         };
 
@@ -222,7 +222,7 @@ impl Rknpu {
             }
             RknpuAction::SetBwPriority => {
                 // 带宽优先级设置
-                log::warn!("SetBwPriority operation not yet implemented");
+                log::debug!("SetBwPriority operation not yet implemented");
                 Err(RknpuError::InternalError)
             }
             RknpuAction::GetBwExpect => {
@@ -231,7 +231,7 @@ impl Rknpu {
             }
             RknpuAction::SetBwExpect => {
                 // 带宽期望值设置
-                log::warn!("SetBwExpect operation not yet implemented");
+                log::debug!("SetBwExpect operation not yet implemented");
                 Err(RknpuError::InternalError)
             }
             RknpuAction::GetBwTw => {
@@ -249,22 +249,22 @@ impl Rknpu {
             }
             RknpuAction::GetDtWrAmount => {
                 // 获取设备写数据量
-                warn!("Get rw_amount is not supported on this device!");
+                debug!("Get rw_amount is not supported on this device!");
                 Ok(0)
             }
             RknpuAction::GetDtRdAmount => {
                 // 获取设备读数据量
-                warn!("Get rw_amount is not supported on this device!");
+                debug!("Get rw_amount is not supported on this device!");
                 Ok(0)
             }
             RknpuAction::GetWtRdAmount => {
                 // 获取等待读数据量
-                warn!("Get rw_amount is not supported on this device!");
+                debug!("Get rw_amount is not supported on this device!");
                 Ok(0)
             }
             RknpuAction::GetTotalRwAmount => {
                 // 获取总读写数据量
-                warn!("Get rw_amount is not supported on this device!");
+                debug!("Get rw_amount is not supported on this device!");
                 Ok(0)
             }
             RknpuAction::GetIommuEn => {
@@ -273,17 +273,17 @@ impl Rknpu {
             }
             RknpuAction::SetProcNice => {
                 // 设置进程优先级 - 在内核空间不适用
-                log::warn!("SetProcNice operation not applicable in bare metal context");
+                log::debug!("SetProcNice operation not applicable in bare metal context");
                 Ok(0)
             }
             RknpuAction::PowerOn => {
                 // 电源开启
-                log::warn!("PowerOn operation not yet implemented");
+                log::debug!("PowerOn operation not yet implemented");
                 Ok(0)
             }
             RknpuAction::PowerOff => {
                 // 电源关闭
-                log::warn!("PowerOff operation not yet implemented");
+                log::debug!("PowerOff operation not yet implemented");
                 Ok(0)
             }
             RknpuAction::GetTotalSramSize => {
@@ -293,7 +293,7 @@ impl Rknpu {
             RknpuAction::GetFreeSramSize => Ok(self.data.nbuf_size as u32),
             RknpuAction::GetIommuDomainId => {
                 // 获取IOMMU域ID - 需要IOMMU管理
-                log::warn!("GetIommuDomainId operation not yet implemented");
+                log::debug!("GetIommuDomainId operation not yet implemented");
                 Ok(0)
             }
             RknpuAction::SetIommuDomainId => {

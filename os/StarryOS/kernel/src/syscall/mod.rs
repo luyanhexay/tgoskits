@@ -53,17 +53,6 @@ fn sysclass(sysno: Sysno) -> usize {
     }
 }
 
-fn sysclass_name(i: usize) -> &'static str {
-    match i {
-        0 => "futex",
-        1 => "sleep",
-        2 => "yield",
-        3 => "clock",
-        4 => "ioctl",
-        _ => "other",
-    }
-}
-
 /// Fold one finished syscall into the cumulative profile, and print a summary
 /// every `SYSCALL_SUMMARY_EVERY` syscalls (outside any hot loop).
 fn account_syscall(sysno: Sysno, ns: u64) {
@@ -75,25 +64,27 @@ fn account_syscall(sysno: Sysno, ns: u64) {
     if !n.is_multiple_of(SYSCALL_SUMMARY_EVERY) {
         return;
     }
-    let mut total_us = 0u64;
-    for i in 0..SYSCLASS_N {
-        let cnt = SYSCLASS_COUNT[i].load(Ordering::Relaxed);
-        let us = SYSCLASS_NS[i].load(Ordering::Relaxed) / 1000;
-        total_us += us;
-        warn!(
-            "sysprof: {:>5} count={} total_us={}",
-            sysclass_name(i),
-            cnt,
-            us
-        );
-    }
-    let wait_us = (SYSCLASS_NS[0].load(Ordering::Relaxed)
-        + SYSCLASS_NS[1].load(Ordering::Relaxed)
-        + SYSCLASS_NS[2].load(Ordering::Relaxed))
-        / 1000;
+    // One compact line (not 7) so it survives interleaving with other kernel
+    // logs on the noisy UART: cnt/us per class + totals. all_us≈wall ⇒ time is
+    // spent inside syscalls (ioctl busy-poll + futex/sleep waiting); all_us≪wall
+    // ⇒ librknnrt is CPU-bound in userspace between syscalls.
+    let cu = |i: usize| {
+        (
+            SYSCLASS_COUNT[i].load(Ordering::Relaxed),
+            SYSCLASS_NS[i].load(Ordering::Relaxed) / 1000,
+        )
+    };
+    let (fc, fus) = cu(0);
+    let (slc, slus) = cu(1);
+    let (yc, yus) = cu(2);
+    let (cc, cus) = cu(3);
+    let (ic, ius) = cu(4);
+    let (oc, ous) = cu(5);
+    let all_us = fus + slus + yus + cus + ius + ous;
+    let wait_us = fus + slus + yus;
     warn!(
-        "sysprof: TOTAL syscalls={} all_us={} wait(futex+sleep+yield)_us={}",
-        n, total_us, wait_us
+        "sysprof n={n} all_us={all_us} wait_us={wait_us} | futex={fc}/{fus} sleep={slc}/{slus} \
+         yield={yc}/{yus} clock={cc}/{cus} ioctl={ic}/{ius} other={oc}/{ous}",
     );
 }
 
