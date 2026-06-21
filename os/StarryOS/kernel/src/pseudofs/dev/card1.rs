@@ -4,7 +4,7 @@ use core::{
     convert::TryFrom,
     ffi::{CStr, c_char, c_ulong},
     mem,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
     task::Context,
 };
 
@@ -58,6 +58,108 @@ static RKNPU_ACTION_LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
 static RKNPU_MEM_CREATE_LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
 static RKNPU_MEM_SYNC_LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
 static RKNPU_SUBMIT_LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+// EXEC-3: partition the per-inference wall time across ioctl types + userspace
+// gaps. EXEC-2 (§27) settled that the NPU hardware is busy only ~9.6% (≈22ms of
+// 211ms); the other ~189ms is software. This breaks that ~189ms down by *where*
+// it lives: inside each ioctl type's in-kernel handling (submit / mem_sync /
+// mem_create / ...) vs the userspace gap between two consecutive rknpu ioctls
+// (librknnrt processing — the kernel is not even on the CPU then). Pure reads of
+// monotonic_time_nanos(); a cumulative summary printed ONCE every N driver
+// ioctls (never per-call), so it never pollutes the measured runs. Indexed by
+// the RknpuCmd discriminant 0..=5 (Action..MemSync).
+const RKNPU_IOCTL_SUMMARY_EVERY: u64 = 4096;
+const RKNPU_CMD_KINDS: usize = 6;
+static RKNPU_IOCTL_TOTAL: AtomicU64 = AtomicU64::new(0);
+static RKNPU_LAST_EXIT_NS: AtomicU64 = AtomicU64::new(0);
+static RKNPU_GAP_NS: AtomicU64 = AtomicU64::new(0);
+static RKNPU_GAP_COUNT: AtomicU64 = AtomicU64::new(0);
+static RKNPU_CMD_COUNT: [AtomicU64; RKNPU_CMD_KINDS] =
+    [const { AtomicU64::new(0) }; RKNPU_CMD_KINDS];
+static RKNPU_CMD_NS: [AtomicU64; RKNPU_CMD_KINDS] = [const { AtomicU64::new(0) }; RKNPU_CMD_KINDS];
+
+/// Human-readable name for an `RknpuCmd` discriminant, for the EXEC-3 summary.
+fn rknpu_cmd_name(idx: usize) -> &'static str {
+    match idx {
+        0 => "action",
+        1 => "submit",
+        2 => "mem_create",
+        3 => "mem_map",
+        4 => "mem_destroy",
+        5 => "mem_sync",
+        _ => "?",
+    }
+}
+
+/// EXEC-3 accounting: fold one completed driver ioctl into the cumulative
+/// partition (per-cmd in-kernel time + userspace gap since the previous ioctl),
+/// and print a cumulative summary every `RKNPU_IOCTL_SUMMARY_EVERY` ioctls. The
+/// print happens outside any poll/hot loop, so it does not perturb timing.
+fn account_rknpu_ioctl(op: RknpuCmd, entry_ns: u64, exit_ns: u64) {
+    let idx = op as usize;
+    if idx < RKNPU_CMD_KINDS {
+        RKNPU_CMD_COUNT[idx].fetch_add(1, Ordering::Relaxed);
+        RKNPU_CMD_NS[idx].fetch_add(exit_ns.saturating_sub(entry_ns), Ordering::Relaxed);
+    }
+
+    // Userspace gap = time from the previous ioctl's exit to this one's entry.
+    let last_exit = RKNPU_LAST_EXIT_NS.swap(exit_ns, Ordering::Relaxed);
+    if last_exit != 0 && entry_ns > last_exit {
+        RKNPU_GAP_NS.fetch_add(entry_ns - last_exit, Ordering::Relaxed);
+        RKNPU_GAP_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+
+    let n = RKNPU_IOCTL_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+    if !n.is_multiple_of(RKNPU_IOCTL_SUMMARY_EVERY) {
+        return;
+    }
+
+    // kernel_us = Σ in-kernel time over all cmd types; gap_us = Σ userspace gaps.
+    // kernel_us + gap_us ≈ total wall spent in the rknpu ioctl stream, so the
+    // ratios say exactly where the ~189ms goes.
+    let mut kernel_us = 0u64;
+    for i in 0..RKNPU_CMD_KINDS {
+        let cnt = RKNPU_CMD_COUNT[i].load(Ordering::Relaxed);
+        if cnt == 0 {
+            continue;
+        }
+        let total_us = RKNPU_CMD_NS[i].load(Ordering::Relaxed) / 1000;
+        kernel_us += total_us;
+        // warn! (not info!) so the partition table stays visible under the
+        // board's measurement config `log="Warn"`, which suppresses the heavy
+        // per-syscall Info spam that otherwise overflows the UART and corrupts
+        // the console. Printed only every RKNPU_IOCTL_SUMMARY_EVERY ioctls.
+        warn!(
+            "rknpu part: {:>11} count={} total_us={} avg_us={}",
+            rknpu_cmd_name(i),
+            cnt,
+            total_us,
+            total_us / cnt,
+        );
+    }
+    let gap_us = RKNPU_GAP_NS.load(Ordering::Relaxed) / 1000;
+    let gap_cnt = RKNPU_GAP_COUNT.load(Ordering::Relaxed);
+    let wall_us = kernel_us + gap_us;
+    let kernel_permille = if wall_us > 0 {
+        kernel_us.saturating_mul(1000) / wall_us
+    } else {
+        0
+    };
+    warn!(
+        "rknpu part: TOTAL ioctls={} kernel_us={} gap_us={} (gap_cnt={} avg_us={}) wall_us={} \
+         kernel={}.{}% gap={}.{}%",
+        n,
+        kernel_us,
+        gap_us,
+        gap_cnt,
+        if gap_cnt > 0 { gap_us / gap_cnt } else { 0 },
+        wall_us,
+        kernel_permille / 10,
+        kernel_permille % 10,
+        (1000 - kernel_permille) / 10,
+        (1000 - kernel_permille) % 10,
+    );
+}
 
 /// DRM_IOCTL_VERSION ioctl argument type
 #[repr(C)]
@@ -320,8 +422,21 @@ pub fn copy_to_user(dst: *mut u8, src: *const u8, size: usize) -> Result<(), Vfs
     Ok(())
 }
 
-/// Handles RKNPU action ioctl commands
+/// Handles RKNPU driver ioctls, timing the whole call so EXEC-3 accounting can
+/// partition wall time across ioctl types and userspace gaps. The real work is
+/// in `rknpu_driver_ioctl_inner`; this shell brackets it with a monotonic clock
+/// read on entry and exit (covering every path, including early `Err` returns)
+/// and folds the result into the cumulative partition.
 pub fn rknpu_driver_ioctl(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
+    let entry_ns = monotonic_time_nanos();
+    let result = rknpu_driver_ioctl_inner(op, arg);
+    let exit_ns = monotonic_time_nanos();
+    account_rknpu_ioctl(op, entry_ns, exit_ns);
+    result
+}
+
+/// Handles RKNPU action ioctl commands
+fn rknpu_driver_ioctl_inner(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
     debug!("rknpu_driver_ioctl: op = {:?}", op);
     match op {
         RknpuCmd::Submit => {
