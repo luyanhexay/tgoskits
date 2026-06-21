@@ -88,11 +88,11 @@ static RKNPU_CMD_NS: [AtomicU64; RKNPU_CMD_KINDS] = [const { AtomicU64::new(0) }
 // the A76 clusters to max and re-probe, so successive bursts print slow (boot
 // freq) then fast (raised).
 const BURST_GAP_NS: u64 = 30_000_000; // >30ms idle between submits ⇒ inference boundary
-const RAISE_AFTER_SUBMITS: u64 = 60;
+const RAISE_AFTER_BURSTS: u64 = 2; // raise after 2 boot-clock inferences
 static SUBMIT_LAST_NS: AtomicU64 = AtomicU64::new(0);
 static SUBMIT_BURST_START_NS: AtomicU64 = AtomicU64::new(0);
 static SUBMIT_BURST_COUNT: AtomicU64 = AtomicU64::new(0);
-static SUBMIT_TOTAL: AtomicU64 = AtomicU64::new(0);
+static SUBMIT_BURST_DONE: AtomicU64 = AtomicU64::new(0);
 static FREQ_RAISED: AtomicBool = AtomicBool::new(false);
 
 /// Human-readable name for an `RknpuCmd` discriminant, for the EXEC-3 summary.
@@ -144,18 +144,21 @@ fn account_rknpu_ioctl(op: RknpuCmd, entry_ns: u64, exit_ns: u64) {
                     span_us,
                     span_us / cnt
                 );
+                // Raise the A76 clusters HERE — at an inference boundary, where the
+                // cores are between clusters (relatively idle) — after a couple of
+                // boot-clock bursts. EXEC-4c found a mid-cluster raise glitches/hangs
+                // (no voltage ramp under active compute, §33); a boundary raise is
+                // stable, and both before/after bursts get clean spans. No re-probe
+                // here (its 0.2s busy-loop would split the next burst); the EXEC-4b
+                // warn! logs the before/after SCMI clock, and the burst span ratio
+                // is itself the measured speedup.
+                let done = SUBMIT_BURST_DONE.fetch_add(1, Ordering::Relaxed) + 1;
+                if done == RAISE_AFTER_BURSTS && !FREQ_RAISED.swap(true, Ordering::Relaxed) {
+                    rknpu::set_cpu_clusters_max();
+                }
             }
         } else {
             SUBMIT_BURST_COUNT.fetch_add(1, Ordering::Relaxed);
-        }
-
-        // After ~1 inference at the boot clock, raise the A76 clusters once and
-        // re-probe, so later bursts print at the raised clock — before/after in
-        // one boot.
-        let sn = SUBMIT_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
-        if sn >= RAISE_AFTER_SUBMITS && !FREQ_RAISED.swap(true, Ordering::Relaxed) {
-            rknpu::set_cpu_clusters_max();
-            measure_and_log_cpu_mhz();
         }
     }
 
