@@ -470,6 +470,12 @@ fn measure_and_log_cpu_mhz() {}
 /// and folds the result into the cumulative partition.
 pub fn rknpu_driver_ioctl(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
     if !CPU_MHZ_PROBED.swap(true, Ordering::Relaxed) {
+        // EXEC-4b: raise the A76 clusters to 2.4GHz *before* the probe, so the
+        // probe re-measures the raised clock and confirms the change took effect
+        // (should now read ~2400 vs the ~1209 of EXEC-4 §31). Done on the first
+        // NPU ioctl (inference start), not at boot, so a failed SCMI set cannot
+        // wedge boot.
+        rknpu::set_cpu_clusters_max();
         measure_and_log_cpu_mhz();
     }
     let entry_ns = monotonic_time_nanos();

@@ -158,6 +158,37 @@ pub fn is_available() -> bool {
     rdrive::get_one::<Rknpu>().is_some()
 }
 
+/// EXEC-4b: raise the A76 big-core clusters to their 2.4GHz max via SCMI, logging
+/// before/after. RK3588 CPU clusters are voltage-coupled DVFS arbitrated by ATF
+/// over SCMI; the board DTB leaves them at 816MHz (`assigned-clock-rates`) and
+/// EXEC-4 (§31) measured the cores running ~1.2GHz, so all userspace — including
+/// the closed `librknnrt` that owns the ~187ms/inference bottleneck (§30/§31) —
+/// runs ~2x slow. SCMI clock ids are read from the board DTB: A76 B0 cluster
+/// (cpu@400/500)=2, B1 cluster (cpu@600/700)=3. The phandle arg to the SCMI
+/// helpers is ignored (single registered SCMI instance), so a dummy is fine.
+pub fn set_cpu_clusters_max() {
+    const A76_MAX_HZ: u64 = 2_400_000_000;
+    for (name, id) in [("A76_B0", 2u32), ("A76_B1", 3u32)] {
+        let before = crate::soc::scmi::clock_rate(fdt_edit::Phandle::from(0u32), id).unwrap_or(0);
+        match crate::soc::scmi::set_clock_rate(fdt_edit::Phandle::from(0u32), id, A76_MAX_HZ) {
+            Some(()) => {
+                let after =
+                    crate::soc::scmi::clock_rate(fdt_edit::Phandle::from(0u32), id).unwrap_or(0);
+                info!(
+                    "EXEC-4b: {} (scmi clk {}) {} -> {} Hz",
+                    name, id, before, after
+                );
+            }
+            None => log::warn!(
+                "EXEC-4b: failed to raise {} (scmi clk {}) to {} Hz",
+                name,
+                id,
+                A76_MAX_HZ
+            ),
+        }
+    }
+}
+
 pub fn obj_addr_and_size(handle: u32) -> Result<(usize, usize), Error> {
     with_npu(|npu| npu.get_obj_addr_and_size(handle).ok_or(Error::NotFound))
 }
