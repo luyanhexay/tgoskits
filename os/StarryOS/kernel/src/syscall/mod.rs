@@ -38,7 +38,7 @@ const SYSCLASS_N: usize = 6;
 static SYSCLASS_COUNT: [AtomicU64; SYSCLASS_N] = [const { AtomicU64::new(0) }; SYSCLASS_N];
 static SYSCLASS_NS: [AtomicU64; SYSCLASS_N] = [const { AtomicU64::new(0) }; SYSCLASS_N];
 static SYSCALL_TOTAL: AtomicU64 = AtomicU64::new(0);
-const SYSCALL_SUMMARY_EVERY: u64 = 200_000;
+const SYSCALL_SUMMARY_EVERY: u64 = 10_000;
 
 /// Map a syscall to its accounting class: 0=futex 1=sleep 2=yield 3=clock
 /// 4=ioctl 5=other. (futex/sleep/yield are the "blocking/waiting" classes.)
