@@ -248,10 +248,18 @@ pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &AxTaskRef) -> AxRunQueu
         let current_cpu = this_cpu_id();
         let last_cpu = task.cpu_id() as usize;
         let cpumask = task.cpumask();
-        let index = if cpumask.get(current_cpu) {
-            current_cpu
-        } else if last_cpu < ax_config::plat::MAX_CPU_NUM && cpumask.get(last_cpu) {
+        // Prefer the task's home CPU (where it last ran) over the waker's CPU.
+        // Returning a woken task to the waker greedily collapses a producer/
+        // consumer pipeline onto one core: each stage's cond-var signal migrates
+        // the next blocked stage onto the signaler, so all stages pile up on a
+        // single CPU (measured: a 3-stage blocking pipeline re-clustered to one
+        // core, speedup 1.0x). Keeping the task on its home CPU preserves the
+        // round-robin spread from initial placement. `last_cpu` is where the task
+        // already ran, so its run queue is guaranteed initialized.
+        let index = if last_cpu < ax_config::plat::MAX_CPU_NUM && cpumask.get(last_cpu) {
             last_cpu
+        } else if cpumask.get(current_cpu) {
+            current_cpu
         } else {
             select_run_queue_index(cpumask).unwrap_or(current_cpu)
         };
