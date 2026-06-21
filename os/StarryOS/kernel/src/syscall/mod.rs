@@ -12,8 +12,10 @@ mod sys;
 mod task;
 mod time;
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use ax_errno::{AxError, LinuxError};
-use ax_runtime::hal::cpu::uspace::UserContext;
+use ax_runtime::hal::{cpu::uspace::UserContext, time::monotonic_time_nanos};
 use starry_signal::Signo;
 use syscalls::Sysno;
 
@@ -22,6 +24,78 @@ pub use self::{
     task::*, time::*,
 };
 use crate::task::{AsThread, SeccompDecision, do_exit, seccomp_errno};
+
+// EXEC-4 (#3): per-syscall-class time accounting, to settle whether the ~187ms
+// userspace gap per inference (EXEC-3 §30) is CPU-busy (librknnrt computing) or
+// blocked (waiting on OS primitives). Each user syscall is timed and folded into
+// one of a few classes; a cumulative summary is printed every N syscalls (warn!,
+// so it survives the board's log=Warn measurement config). Reading:
+//   - futex+sleep+yield time large  -> librknnrt is WAITING -> lever = faster OS
+//     wait primitives (futex/timer/scheduler wakeup).
+//   - those tiny while inference wall >> total syscall time -> librknnrt is
+//     CPU-bound between submits -> lever = CPU frequency (EXEC-4 #1).
+const SYSCLASS_N: usize = 6;
+static SYSCLASS_COUNT: [AtomicU64; SYSCLASS_N] = [const { AtomicU64::new(0) }; SYSCLASS_N];
+static SYSCLASS_NS: [AtomicU64; SYSCLASS_N] = [const { AtomicU64::new(0) }; SYSCLASS_N];
+static SYSCALL_TOTAL: AtomicU64 = AtomicU64::new(0);
+const SYSCALL_SUMMARY_EVERY: u64 = 200_000;
+
+/// Map a syscall to its accounting class: 0=futex 1=sleep 2=yield 3=clock
+/// 4=ioctl 5=other. (futex/sleep/yield are the "blocking/waiting" classes.)
+fn sysclass(sysno: Sysno) -> usize {
+    match sysno {
+        Sysno::futex => 0,
+        Sysno::nanosleep | Sysno::clock_nanosleep => 1,
+        Sysno::sched_yield => 2,
+        Sysno::clock_gettime => 3,
+        Sysno::ioctl => 4,
+        _ => 5,
+    }
+}
+
+fn sysclass_name(i: usize) -> &'static str {
+    match i {
+        0 => "futex",
+        1 => "sleep",
+        2 => "yield",
+        3 => "clock",
+        4 => "ioctl",
+        _ => "other",
+    }
+}
+
+/// Fold one finished syscall into the cumulative profile, and print a summary
+/// every `SYSCALL_SUMMARY_EVERY` syscalls (outside any hot loop).
+fn account_syscall(sysno: Sysno, ns: u64) {
+    let c = sysclass(sysno);
+    SYSCLASS_COUNT[c].fetch_add(1, Ordering::Relaxed);
+    SYSCLASS_NS[c].fetch_add(ns, Ordering::Relaxed);
+
+    let n = SYSCALL_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+    if !n.is_multiple_of(SYSCALL_SUMMARY_EVERY) {
+        return;
+    }
+    let mut total_us = 0u64;
+    for i in 0..SYSCLASS_N {
+        let cnt = SYSCLASS_COUNT[i].load(Ordering::Relaxed);
+        let us = SYSCLASS_NS[i].load(Ordering::Relaxed) / 1000;
+        total_us += us;
+        warn!(
+            "sysprof: {:>5} count={} total_us={}",
+            sysclass_name(i),
+            cnt,
+            us
+        );
+    }
+    let wait_us = (SYSCLASS_NS[0].load(Ordering::Relaxed)
+        + SYSCLASS_NS[1].load(Ordering::Relaxed)
+        + SYSCLASS_NS[2].load(Ordering::Relaxed))
+        / 1000;
+    warn!(
+        "sysprof: TOTAL syscalls={} all_us={} wait(futex+sleep+yield)_us={}",
+        n, total_us, wait_us
+    );
+}
 
 pub fn syscall_allows_signal_restart(sysno: usize) -> bool {
     !matches!(Sysno::new(sysno), Some(Sysno::msgsnd | Sysno::msgrcv))
@@ -79,6 +153,7 @@ pub fn handle_syscall(uctx: &mut UserContext) {
     // non-x86_64 arches retval and arg0 (signo) share a register.
     let prev_ip = uctx.ip();
 
+    let syscall_t0 = monotonic_time_nanos();
     let result = match sysno {
         // fs ctl
         Sysno::ioctl => sys_ioctl(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
@@ -952,6 +1027,7 @@ pub fn handle_syscall(uctx: &mut UserContext) {
             Err(AxError::Unsupported)
         }
     };
+    account_syscall(sysno, monotonic_time_nanos().saturating_sub(syscall_t0));
     debug!("Syscall {sysno} return {result:?}");
     let new_retval = result.unwrap_or_else(|err| -LinuxError::from(err).code() as _) as _;
 

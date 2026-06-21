@@ -4,7 +4,7 @@ use core::{
     convert::TryFrom,
     ffi::{CStr, c_char, c_ulong},
     mem,
-    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     task::Context,
 };
 
@@ -422,12 +422,56 @@ pub fn copy_to_user(dst: *mut u8, src: *const u8, size: usize) -> Result<(), Vfs
     Ok(())
 }
 
+// EXEC-4 (#1): one-shot empirical CPU-frequency probe. EXEC-3 §30 localized the
+// ~187ms/inference to userspace librknnrt; the lead hypothesis is the A76 cluster
+// runs well below its 2.4GHz max (back-of-envelope from §29 put it ~1GHz). This
+// measures the *actual* clock the way that matters — how fast code runs — by
+// timing a fixed-length dependent decrement loop against the monotonic clock,
+// which needs no SCMI/CRU clock IDs. Fired once on the first NPU ioctl (in the
+// inference process context), so the ~0.1-0.2s loop happens before the measured
+// runs and never perturbs them.
+static CPU_MHZ_PROBED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(target_arch = "aarch64")]
+fn measure_and_log_cpu_mhz() {
+    const ITERS: u64 = 200_000_000;
+    let t0 = monotonic_time_nanos();
+    let mut n = ITERS;
+    // A tight `subs; b.ne` loop: the subs->subs dependency is the critical path,
+    // so it retires at ~1 cycle/iteration on A76/A55 — good enough to tell 1.0GHz
+    // from 2.4GHz. SAFETY: pure register arithmetic, no memory/stack access.
+    unsafe {
+        core::arch::asm!(
+            "2:",
+            "subs {n}, {n}, #1",
+            "b.ne 2b",
+            n = inout(reg) n,
+            options(nomem, nostack),
+        );
+    }
+    core::hint::black_box(n);
+    let dt_ns = monotonic_time_nanos().saturating_sub(t0).max(1);
+    // MHz = cycles / microseconds = ITERS*1000 / dt_ns (assuming ~1 cyc/iter).
+    let mhz = ITERS.saturating_mul(1000) / dt_ns;
+    warn!(
+        "cpufreq probe: {} dependent-sub iters in {} ns -> ~{} MHz (assume ~1 cyc/iter; RK3588 \
+         A76 max 2400, A55 max 1800)",
+        ITERS, dt_ns, mhz
+    );
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn measure_and_log_cpu_mhz() {}
+
 /// Handles RKNPU driver ioctls, timing the whole call so EXEC-3 accounting can
 /// partition wall time across ioctl types and userspace gaps. The real work is
 /// in `rknpu_driver_ioctl_inner`; this shell brackets it with a monotonic clock
 /// read on entry and exit (covering every path, including early `Err` returns)
 /// and folds the result into the cumulative partition.
 pub fn rknpu_driver_ioctl(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
+    if !CPU_MHZ_PROBED.swap(true, Ordering::Relaxed) {
+        measure_and_log_cpu_mhz();
+    }
     let entry_ns = monotonic_time_nanos();
     let result = rknpu_driver_ioctl_inner(op, arg);
     let exit_ns = monotonic_time_nanos();
