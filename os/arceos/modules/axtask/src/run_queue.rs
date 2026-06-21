@@ -56,6 +56,16 @@ static mut RUN_QUEUES: [MaybeUninit<&'static mut AxRunQueue>; ax_config::plat::M
 #[allow(clippy::declare_interior_mutable_const)] // It's ok because it's used only for initialization `RUN_QUEUES`.
 const ARRAY_REPEAT_VALUE: MaybeUninit<&'static mut AxRunQueue> = MaybeUninit::uninit();
 
+/// Bitmask of CPUs whose entry in [`RUN_QUEUES`] has been initialized (each CPU
+/// sets its own bit at the end of [`init`] / [`init_secondary`]).
+/// [`select_run_queue_index`] consults this so round-robin placement never
+/// targets a CPU whose run queue is still `MaybeUninit::uninit` (dereferencing
+/// it would be undefined behavior). The bit is published with `Release` and read
+/// with `Acquire` so a CPU that observes the bit also observes the preceding
+/// `RUN_QUEUES[cpu_id]` write.
+#[cfg(feature = "smp")]
+static CPU_RQ_ONLINE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
 #[cfg(not(feature = "host-test"))]
 fn main_task_stack() -> TaskStack {
     let (stack_ptr, stack_size) = ax_hal::mem::boot_stack_bounds(this_cpu_id());
@@ -110,19 +120,23 @@ pub(crate) fn current_run_queue<G: BaseGuard>() -> CurrentRunQueueRef<'static, G
 // The modulo operation is safe here because `ax_config::plat::MAX_CPU_NUM` is always greater than 1 with "smp" enabled.
 #[allow(clippy::modulo_one)]
 #[inline]
-fn select_run_queue_index(cpumask: AxCpuMask) -> usize {
+fn select_run_queue_index(cpumask: AxCpuMask) -> Option<usize> {
     use core::sync::atomic::{AtomicUsize, Ordering};
     static RUN_QUEUE_INDEX: AtomicUsize = AtomicUsize::new(0);
 
-    assert!(!cpumask.is_empty(), "No available CPU for task execution");
+    let online = CPU_RQ_ONLINE.load(Ordering::Acquire);
+    let start = RUN_QUEUE_INDEX.fetch_add(1, Ordering::SeqCst);
 
-    // Round-robin selection of the run queue index.
-    loop {
-        let index = RUN_QUEUE_INDEX.fetch_add(1, Ordering::SeqCst) % ax_config::plat::MAX_CPU_NUM;
-        if cpumask.get(index) {
-            return index;
-        }
-    }
+    // Single round-robin sweep from a rotating start offset: return the first CPU
+    // that is both allowed by the task affinity and has an initialized run queue.
+    // Returns `None` when no eligible CPU exists yet — during early boot before
+    // the secondaries register their run queues, or for a task pinned to an
+    // offline CPU — so callers fall back to the current CPU, whose run queue is
+    // always initialized before it places any task.
+    (0..ax_config::plat::MAX_CPU_NUM).find_map(|i| {
+        let index = (start + i) % ax_config::plat::MAX_CPU_NUM;
+        (cpumask.get(index) && (online & (1 << index)) != 0).then_some(index)
+    })
 }
 
 /// Retrieves a `'static` reference to the run queue corresponding to the given index.
@@ -189,14 +203,20 @@ pub(crate) fn select_run_queue<G: BaseGuard>(task: &AxTaskRef) -> AxRunQueueRef<
     }
     #[cfg(feature = "smp")]
     {
-        // When SMP is enabled, prefer the current CPU to keep the task's
-        // cache warm. Fall back to round-robin only when affinity forbids it.
-        let current_cpu = this_cpu_id();
-        let index = if task.cpumask().get(current_cpu) {
-            current_cpu
-        } else {
-            select_run_queue_index(task.cpumask())
-        };
+        // Distribute new tasks across all eligible CPUs via round-robin.
+        //
+        // The previous policy preferred the current (spawning) CPU to keep the
+        // cache warm. Combined with the default all-CPU affinity that preference
+        // always won, so every task spawned by a CPU0-resident parent stayed on
+        // CPU0; and because no load balancer exists to migrate runnable tasks off
+        // an overloaded CPU, the whole userspace process tree (descending from
+        // init on CPU0) piled onto CPU0 while CPU1..N sat idle. Round-robin
+        // placement spreads long-lived threads across cores, so a pipeline's
+        // capture/infer/control stages and the NPU busy-poll each get their own
+        // core. Remote placement is woken by the IPI in `AxRunQueue::add_task`.
+        // Fall back to the current CPU when no other CPU is eligible yet (early
+        // boot / pinned-to-offline-CPU); its run queue is always initialized.
+        let index = select_run_queue_index(task.cpumask()).unwrap_or_else(this_cpu_id);
         AxRunQueueRef {
             inner: get_run_queue(index),
             state: irq_state,
@@ -233,7 +253,7 @@ pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &AxTaskRef) -> AxRunQueu
         } else if last_cpu < ax_config::plat::MAX_CPU_NUM && cpumask.get(last_cpu) {
             last_cpu
         } else {
-            select_run_queue_index(cpumask)
+            select_run_queue_index(cpumask).unwrap_or(current_cpu)
         };
         AxRunQueueRef {
             inner: get_run_queue(index),
@@ -838,6 +858,10 @@ pub(crate) fn init() {
     unsafe {
         RUN_QUEUES[cpu_id].write(RUN_QUEUE.current_ref_mut_raw());
     }
+    // Publish this CPU's run queue as eligible for round-robin task placement.
+    // Release pairs with the Acquire load in `select_run_queue_index`.
+    #[cfg(feature = "smp")]
+    CPU_RQ_ONLINE.fetch_or(1 << cpu_id, core::sync::atomic::Ordering::Release);
 }
 
 pub(crate) fn init_secondary(stack_ptr: VirtAddr, stack_size: usize) {
@@ -861,4 +885,8 @@ pub(crate) fn init_secondary(stack_ptr: VirtAddr, stack_size: usize) {
     unsafe {
         RUN_QUEUES[cpu_id].write(RUN_QUEUE.current_ref_mut_raw());
     }
+    // Publish this CPU's run queue as eligible for round-robin task placement.
+    // Release pairs with the Acquire load in `select_run_queue_index`.
+    #[cfg(feature = "smp")]
+    CPU_RQ_ONLINE.fetch_or(1 << cpu_id, core::sync::atomic::Ordering::Release);
 }
