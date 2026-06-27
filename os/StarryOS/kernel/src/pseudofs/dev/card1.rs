@@ -89,6 +89,12 @@ static RKNPU_CMD_NS: [AtomicU64; RKNPU_CMD_KINDS] = [const { AtomicU64::new(0) }
 // freq) then fast (raised).
 const BURST_GAP_NS: u64 = 30_000_000; // >30ms idle between submits ⇒ inference boundary
 const RAISE_AFTER_BURSTS: u64 = 2; // raise after 2 boot-clock inferences
+// EXEC-4c measurement found the auto-raise (SCMI A76→2.4GHz at an inference
+// boundary) is a confound: v5 npu_smoke shows the NPU clock then oscillates
+// bimodally (rknn_run 69.5ms ⇄ 210ms, ~3× jitter) and sustained in-context
+// inference degrades and hangs (§34). Gate the auto-raise OFF to get a clean,
+// reproducible baseline; the burst timing below is kept for diagnostics.
+const AUTO_RAISE_FREQ: bool = false;
 static SUBMIT_LAST_NS: AtomicU64 = AtomicU64::new(0);
 static SUBMIT_BURST_START_NS: AtomicU64 = AtomicU64::new(0);
 static SUBMIT_BURST_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -153,7 +159,10 @@ fn account_rknpu_ioctl(op: RknpuCmd, entry_ns: u64, exit_ns: u64) {
                 // warn! logs the before/after SCMI clock, and the burst span ratio
                 // is itself the measured speedup.
                 let done = SUBMIT_BURST_DONE.fetch_add(1, Ordering::Relaxed) + 1;
-                if done == RAISE_AFTER_BURSTS && !FREQ_RAISED.swap(true, Ordering::Relaxed) {
+                if AUTO_RAISE_FREQ
+                    && done == RAISE_AFTER_BURSTS
+                    && !FREQ_RAISED.swap(true, Ordering::Relaxed)
+                {
                     rknpu::set_cpu_clusters_max();
                 }
             }
