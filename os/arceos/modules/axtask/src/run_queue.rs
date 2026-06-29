@@ -119,11 +119,27 @@ fn select_run_queue_index(cpumask: AxCpuMask) -> usize {
     // Round-robin selection of the run queue index.
     loop {
         let index = RUN_QUEUE_INDEX.fetch_add(1, Ordering::SeqCst) % ax_config::plat::MAX_CPU_NUM;
-        if cpumask.get(index) {
+        // With `task-spread`, this is the placement path for *every* new task,
+        // so it may be reached during early SMP bring-up before a secondary
+        // CPU's run queue is initialized. Skip any CPU not yet published in
+        // `CPU_RQ_ONLINE` to avoid dereferencing an uninitialized run queue.
+        #[cfg(feature = "task-spread")]
+        let eligible =
+            cpumask.get(index) && (CPU_RQ_ONLINE.load(Ordering::Acquire) & (1 << index)) != 0;
+        #[cfg(not(feature = "task-spread"))]
+        let eligible = cpumask.get(index);
+        if eligible {
             return index;
         }
     }
 }
+
+// Bitmask of CPUs whose run queue has been initialized (one bit per `cpu_id`).
+// Only consulted under `task-spread`, where round-robin placement may otherwise
+// target a secondary CPU whose run queue is still `MaybeUninit::uninit` during
+// early bring-up. Set once per CPU in `init` / `init_secondary`.
+#[cfg(all(feature = "smp", feature = "task-spread"))]
+static CPU_RQ_ONLINE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// Retrieves a `'static` reference to the run queue corresponding to the given index.
 ///
@@ -192,11 +208,24 @@ pub(crate) fn select_run_queue<G: BaseGuard>(task: &AxTaskRef) -> AxRunQueueRef<
         // When SMP is enabled, prefer the current CPU to keep the task's
         // cache warm. Fall back to round-robin only when affinity forbids it.
         let current_cpu = this_cpu_id();
+        #[cfg(not(feature = "task-spread"))]
         let index = if task.cpumask().get(current_cpu) {
             current_cpu
         } else {
             select_run_queue_index(task.cpumask())
         };
+        // With `task-spread`, distribute new tasks across all eligible CPUs via
+        // round-robin instead of preferring the spawning CPU. With the default
+        // all-CPU affinity, "prefer current" otherwise pins a whole process tree
+        // (every thread cloned from `init` on CPU0) onto CPU0 while CPU1..N idle,
+        // since there is no periodic load balancer to migrate runnable tasks off
+        // an overloaded core. Trades cache warmth for parallelism, so it is
+        // opt-in. `select_run_queue_index` honors the task's affinity mask, so a
+        // task pinned to a single CPU still lands there.
+        #[cfg(feature = "task-spread")]
+        let _ = current_cpu;
+        #[cfg(feature = "task-spread")]
+        let index = select_run_queue_index(task.cpumask());
         AxRunQueueRef {
             inner: get_run_queue(index),
             state: irq_state,
@@ -824,6 +853,9 @@ pub(crate) fn init() {
     unsafe {
         RUN_QUEUES[cpu_id].write(RUN_QUEUE.current_ref_mut_raw());
     }
+    // Publish this run queue as a valid round-robin placement target.
+    #[cfg(all(feature = "smp", feature = "task-spread"))]
+    CPU_RQ_ONLINE.fetch_or(1 << cpu_id, core::sync::atomic::Ordering::Release);
 }
 
 pub(crate) fn init_secondary(stack_ptr: VirtAddr, stack_size: usize) {
@@ -847,4 +879,7 @@ pub(crate) fn init_secondary(stack_ptr: VirtAddr, stack_size: usize) {
     unsafe {
         RUN_QUEUES[cpu_id].write(RUN_QUEUE.current_ref_mut_raw());
     }
+    // Publish this run queue as a valid round-robin placement target.
+    #[cfg(all(feature = "smp", feature = "task-spread"))]
+    CPU_RQ_ONLINE.fetch_or(1 << cpu_id, core::sync::atomic::Ordering::Release);
 }

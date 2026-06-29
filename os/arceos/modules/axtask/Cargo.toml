@@ -30,6 +30,11 @@ multitask = [
 preempt = ["irq", "ax-percpu?/preempt", "ax-kernel-guard/preempt"]
 smp = ["ax-kspin/smp"]
 stack-canary = []
+# Round-robin new-task placement across CPUs instead of preferring the spawning
+# CPU. Opt-in: trades cache locality for parallelism on compute-bound,
+# multi-threaded workloads that would otherwise pile a whole process tree onto
+# one CPU under the default all-CPU affinity (no periodic load balancer yet).
+task-spread = ["smp"]
 stack-guard-page = ["multitask", "dep:ax-alloc", "dep:ax-mm", "ax-hal/paging"]
 lockdep = [
   "multitask",
